@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Panel de Administración - Traductor Offline</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --bg: #f8fafc;
+            --card: #ffffff;
+            --text: #1e293b;
+            --border: #cbd5e1;
+        }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            max-width: 750px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+        }
+        .card {
+            background: var(--card);
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            border: 1px solid var(--border);
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+        .badge {
+            font-size: 0.85rem;
+            padding: 0.35rem 0.75rem;
+            border-radius: 9999px;
+            background: #e2e8f0;
+            font-weight: 600;
+        }
+        .badge.webgpu { background: #dcfce7; color: #166534; }
+        .badge.wasm { background: #fef3c7; color: #92400e; }
+        .controls {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: #f1f5f9;
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+        }
+        button {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            padding: 0.6rem 1.2rem;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover:not(:disabled) { background-color: var(--primary-hover); }
+        button:disabled { background-color: #94a3b8; cursor: not-allowed; }
+        button.secondary {
+            background-color: #475569;
+        }
+        button.secondary:hover:not(:disabled) { background-color: #334155; }
+        textarea, .output-box {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 0.85rem;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 1rem;
+            font-family: inherit;
+        }
+        textarea { resize: vertical; min-height: 110px; }
+        .output-box {
+            background-color: #f8fafc;
+            min-height: 110px;
+            white-space: pre-wrap;
+            margin-top: 0.5rem;
+        }
+        .status-bar {
+            margin: 1rem 0;
+            padding: 0.75rem;
+            border-radius: 6px;
+            background: #eff6ff;
+            color: #1e40af;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+        .actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <h2 style="margin:0;">Traductor Interno de Soporte (Offline)</h2>
+            <span id="hardwareBadge" class="badge">Detectando hardware...</span>
+        </div>
+
+        <div class="controls">
+            <strong id="directionLabel">Inglés ➔ Español</strong>
+            <button id="swapBtn" class="secondary" type="button">⇄ Cambiar idioma</button>
+        </div>
+
+        <label for="inputText"><strong>Texto original:</strong></label>
+        <textarea id="inputText" placeholder="Escribe o pega aquí el ticket o descripción en inglés..."></textarea>
+
+        <div class="actions">
+            <button id="translateBtn" type="button" disabled>Traducir</button>
+        </div>
+
+        <div id="status" class="status-bar">Inicializando entorno...</div>
+
+        <label><strong>Resultado traducido:</strong></label>
+        <div id="output" class="output-box"></div>
+    </div>
+
+    <script type="module">
+        import { pipeline } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2';
+
+        // Elementos del DOM
+        const hardwareBadge = document.getElementById('hardwareBadge');
+        const directionLabel = document.getElementById('directionLabel');
+        const swapBtn = document.getElementById('swapBtn');
+        const inputText = document.getElementById('inputText');
+        const translateBtn = document.getElementById('translateBtn');
+        const statusEl = document.getElementById('status');
+        const outputEl = document.getElementById('output');
+
+        // Detección de aceleración por hardware (WebGPU con fallback a WASM)
+        const supportsWebGPU = typeof navigator !== "undefined" && "gpu" in navigator;
+        const deviceType = supportsWebGPU ? 'webgpu' : 'wasm';
+
+        hardwareBadge.innerText = supportsWebGPU ? 'Aceleración: WebGPU' : 'Modo CPU: WASM';
+        hardwareBadge.classList.add(deviceType);
+
+        // Estado de la aplicación y caché de pipelines en memoria
+        let currentDirection = 'en-es'; // 'en-es' o 'es-en'
+        const models = {
+            'en-es': { name: 'Xenova/opus-mt-en-es', instance: null },
+            'es-en': { name: 'Xenova/opus-mt-es-en', instance: null }
+        };
+
+        // Carga bajo demanda del modelo seleccionado
+        async function loadModel(direction) {
+            if (models[direction].instance) {
+                statusEl.innerText = "Modelo listo en memoria.";
+                translateBtn.disabled = false;
+                return models[direction].instance;
+            }
+
+            translateBtn.disabled = true;
+            swapBtn.disabled = true;
+            const modelName = models[direction].name;
+            statusEl.innerText = `Cargando modelo (${modelName}) usando ${deviceType.toUpperCase()}...`;
+
+            try {
+                models[direction].instance = await pipeline('translation', modelName, {
+                    device: deviceType,
+                    progress_callback: (p) => {
+                        if (p.status === 'progress' && p.progress) {
+                            statusEl.innerText = `Cargando modelo (${p.file}): ${Math.round(p.progress)}%`;
+                        }
+                    }
+                });
+                statusEl.innerText = "Modelo cargado y listo para traducir.";
+            } catch (error) {
+                // Fallback explícito a WASM si WebGPU falla en tiempo de inicialización
+                if (deviceType === 'webgpu') {
+                    console.warn("Fallo en WebGPU, reintentando con WASM...", error);
+                    hardwareBadge.innerText = 'Modo CPU: WASM (Fallback)';
+                    hardwareBadge.className = 'badge wasm';
+                    models[direction].instance = await pipeline('translation', modelName, { device: 'wasm' });
+                    statusEl.innerText = "Modelo cargado en modo respaldo (WASM).";
+                } else {
+                    statusEl.innerText = "Error al cargar el modelo en el navegador.";
+                    console.error(error);
+                }
+            } finally {
+                translateBtn.disabled = false;
+                swapBtn.disabled = false;
+            }
+
+            return models[direction].instance;
+        }
+
+        // Alternar dirección de traducción
+        swapBtn.addEventListener('click', async () => {
+            currentDirection = currentDirection === 'en-es' ? 'es-en' : 'en-es';
+            
+            if (currentDirection === 'en-es') {
+                directionLabel.innerText = 'Inglés ➔ Español';
+                inputText.placeholder = 'Escribe o pega aquí el ticket o descripción en inglés...';
+            } else {
+                directionLabel.innerText = 'Español ➔ Inglés';
+                inputText.placeholder = 'Escribe o pega aquí el ticket o descripción en español...';
+            }
+            
+            outputEl.innerText = '';
+            await loadModel(currentDirection);
+        });
+
+        // Ejecutar inferencia local
+        translateBtn.addEventListener('click', async () => {
+            const text = inputText.value.trim();
+            if (!text) return;
+
+            translateBtn.disabled = true;
+            swapBtn.disabled = true;
+            statusEl.innerText = "Traduciendo...";
+
+            try {
+                const translator = await loadModel(currentDirection);
+                const result = await translator(text);
+                outputEl.innerText = result[0].translation_text;
+                statusEl.innerText = "¡Traducción completada!";
+            } catch (error) {
+                statusEl.innerText = "Error durante la traducción.";
+                console.error(error);
+            } finally {
+                translateBtn.disabled = false;
+                swapBtn.disabled = false;
+            }
+        });
+
+        // Precargar el modelo inicial (Inglés -> Español) al abrir la página
+        loadModel(currentDirection);
+    </script>
+</body>
+</html>
